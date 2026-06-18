@@ -1,0 +1,18 @@
+# Build output
+build/
+build-*/
+*.o
+*.obj
+*.exe
+*.pdb
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Editor/OS
+.vs/
+.vscode/
+.DS_Store

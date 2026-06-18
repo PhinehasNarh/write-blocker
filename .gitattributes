@@ -1,0 +1,7 @@
+# Normalize line endings: source and docs use LF in the repo so the same
+# files build cleanly on Linux/macOS/Android as well as Windows.
+* text=auto eol=lf
+
+# Treat these as binary if ever added (no EOL conversion).
+*.png binary
+*.img binary
