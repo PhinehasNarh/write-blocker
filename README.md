@@ -54,9 +54,23 @@ Then `adb push build-android/writeblock /data/local/tmp/` and run via
 ```
 writeblock list [--removable-only] [--json]
 writeblock status <device-id> [--json]
-writeblock protect <device-id> [--yes]
-writeblock unprotect <device-id> [--yes]
+writeblock protect <device-id> [--yes] [--hash] [--case ID] [--examiner NAME] [--log PATH]
+writeblock unprotect <device-id> [--yes] [--hash] [--case ID] [--examiner NAME] [--log PATH]
+writeblock hash <device-id> [--quiet] [--json]
+writeblock verify <device-id> <sha256> [--quiet]
+writeblock audit-verify [--log PATH]
+writeblock version
 ```
+
+### Integrity and audit
+
+- `hash` computes a whole-device SHA-256; `verify` compares a device against a
+  known digest. Use these before and after acquisition to prove the media did
+  not change.
+- `protect`/`unprotect` append a record to a tamper-evident, hash-chained audit
+  log (`writeblock-audit.jsonl` by default, or `--log PATH`). `--hash` records
+  the device SHA-256 with the action, and `--case`/`--examiner` add case
+  metadata. `audit-verify` confirms the chain has not been altered.
 
 Device ids come from `list`:
 
@@ -85,18 +99,24 @@ sudo writeblock unprotect /dev/sdb
 
 - `protect`/`unprotect` require an explicit device id; the tool never acts on
   "all devices".
-- The system/boot disk is refused unless you pass `--yes`.
-- Every change prompts for confirmation unless `--yes` is given.
+- Non-system devices prompt for `[y/N]` confirmation unless `--yes` is given.
+- The system/boot disk requires typing its exact device id to proceed; there is
+  deliberately no `--yes` bypass for it.
 - The required privilege (Administrator/root) is checked up front with a clear
   error.
+- Exit codes are stable for scripting: `0` ok, `2` usage, `3` permission,
+  `4` not found, `5` unsupported, `6` verify/chain mismatch.
 
 ## Layout
 
 ```
-include/writeblock.h     Public types + backend contract
+include/writeblock.h     Public types + backend contract (incl. reader API)
 src/main.c               Entry point
 src/cli.c                Arg parsing, dispatch, prompts, output
 src/core.c               Error strings, size formatting, device lookup
+src/sha256.c             Self-contained SHA-256
+src/hash.c               Whole-device hashing via the backend reader
+src/audit.c              Tamper-evident hash-chained audit log
 src/platform/win.c       Windows backend
 src/platform/linux.c     Linux backend
 src/platform/android.c   Android backend (compiles linux.c)

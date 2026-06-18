@@ -187,6 +187,10 @@ int wb_enumerate(wb_device_t **out, size_t *count)
                            sizeof(dev->model)) != 0)
             dev->model[0] = '\0';
 
+        if (read_sysfs_str(e->d_name, "device/serial", dev->serial,
+                           sizeof(dev->serial)) != 0)
+            dev->serial[0] = '\0';
+
         /* Prefer the live ioctl value; fall back to sysfs "ro". */
         int ro = query_readonly(dev->id);
         if (ro < 0 && read_sysfs_str(e->d_name, "ro", tmp, sizeof(tmp)) == 0)
@@ -246,4 +250,57 @@ int wb_status(const char *id, int *read_only_out)
     }
     *read_only_out = ro;
     return WB_OK;
+}
+
+/* ---- Sequential reader (read-only) ---- */
+
+struct wb_reader {
+    int fd;
+};
+
+int wb_reader_open(const char *id, wb_reader **out, uint64_t *size_out)
+{
+    if (!id || !*id || !out)
+        return WB_ERR_INVAL;
+    int fd = open(id, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return (errno == EACCES || errno == EPERM) ? WB_ERR_PERM
+             : (errno == ENOENT) ? WB_ERR_NOT_FOUND : WB_ERR_IO;
+
+    wb_reader *r = malloc(sizeof(*r));
+    if (!r) {
+        close(fd);
+        return WB_ERR_NOMEM;
+    }
+    r->fd = fd;
+
+    if (size_out) {
+        uint64_t sz = 0;
+        if (ioctl(fd, BLKGETSIZE64, &sz) != 0)
+            sz = 0;
+        *size_out = sz;
+    }
+    *out = r;
+    return WB_OK;
+}
+
+int wb_reader_read(wb_reader *r, void *buf, size_t want, size_t *got)
+{
+    if (!r || !buf || !got)
+        return WB_ERR_INVAL;
+    ssize_t n = read(r->fd, buf, want);
+    if (n < 0) {
+        *got = 0;
+        return WB_ERR_IO;
+    }
+    *got = (size_t)n;  /* 0 means end of device */
+    return WB_OK;
+}
+
+void wb_reader_close(wb_reader *r)
+{
+    if (r) {
+        close(r->fd);
+        free(r);
+    }
 }

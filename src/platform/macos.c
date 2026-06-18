@@ -22,6 +22,9 @@
 
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/disk.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,17 +53,20 @@ static int cfstr_prop_to_buf(CFTypeRef ref, char *buf, size_t len)
                               kCFStringEncodingUTF8) ? 0 : -1;
 }
 
-/* Best-effort product name by searching the IOKit parent chain. */
-static void fill_model(io_object_t media, char *buf, size_t len)
+/*
+ * Best-effort string from the IOKit Device Characteristics dict found by
+ * searching the parent chain (e.g. Product Name, Product Serial Number).
+ */
+static void fill_characteristic(io_object_t media, CFStringRef value_key,
+                                char *buf, size_t len)
 {
     buf[0] = '\0';
     CFTypeRef dict = IORegistryEntrySearchCFProperty(
         media, kIOServicePlane, CFSTR(kIOPropertyDeviceCharacteristicsKey),
         kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
     if (dict && CFGetTypeID(dict) == CFDictionaryGetTypeID()) {
-        CFTypeRef name = CFDictionaryGetValue((CFDictionaryRef)dict,
-                                              CFSTR(kIOPropertyProductNameKey));
-        cfstr_prop_to_buf(name, buf, len);
+        CFTypeRef v = CFDictionaryGetValue((CFDictionaryRef)dict, value_key);
+        cfstr_prop_to_buf(v, buf, len);
     }
     if (dict)
         CFRelease(dict);
@@ -172,7 +178,10 @@ int wb_enumerate(wb_device_t **out, size_t *count)
 
         dev->removable = (bool_prop(media, CFSTR(kIOMediaRemovableKey)) ||
                           bool_prop(media, CFSTR(kIOMediaEjectableKey))) ? 1 : 0;
-        fill_model(media, dev->model, sizeof(dev->model));
+        fill_characteristic(media, CFSTR(kIOPropertyProductNameKey),
+                            dev->model, sizeof(dev->model));
+        fill_characteristic(media, CFSTR(kIOPropertyProductSerialNumberKey),
+                            dev->serial, sizeof(dev->serial));
         dev->read_only = disk_readonly_state(dev->id);
         /* The system disk is the one whose volume is mounted at "/". */
         {
@@ -293,4 +302,92 @@ int wb_status(const char *id, int *read_only_out)
         return WB_ERR_INVAL;
     *read_only_out = disk_readonly_state(id);
     return WB_OK;
+}
+
+/* ---- Sequential reader (read-only) ---- */
+
+struct wb_reader {
+    int      fd;
+    uint64_t size;
+    uint64_t pos;
+    uint32_t block;
+};
+
+/* Map "/dev/diskN" to the raw "/dev/rdiskN" node for faster unbuffered reads. */
+static void raw_path(const char *id, char *out, size_t len)
+{
+    const char *base = strrchr(id, '/');
+    base = base ? base + 1 : id;          /* "diskN" */
+    snprintf(out, len, "/dev/r%s", base); /* "/dev/rdiskN" */
+}
+
+int wb_reader_open(const char *id, wb_reader **out, uint64_t *size_out)
+{
+    if (!id || !*id || !out)
+        return WB_ERR_INVAL;
+
+    char rpath[80];
+    raw_path(id, rpath, sizeof(rpath));
+    int fd = open(rpath, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        fd = open(id, O_RDONLY | O_CLOEXEC);  /* fall back to the block node */
+    if (fd < 0)
+        return (errno == EACCES || errno == EPERM) ? WB_ERR_PERM
+             : (errno == ENOENT) ? WB_ERR_NOT_FOUND : WB_ERR_IO;
+
+    uint32_t blocksize = 512;
+    uint64_t blockcount = 0;
+    ioctl(fd, DKIOCGETBLOCKSIZE, &blocksize);
+    ioctl(fd, DKIOCGETBLOCKCOUNT, &blockcount);
+    if (blocksize == 0)
+        blocksize = 512;
+
+    wb_reader *r = malloc(sizeof(*r));
+    if (!r) {
+        close(fd);
+        return WB_ERR_NOMEM;
+    }
+    r->fd = fd;
+    r->size = blockcount * (uint64_t)blocksize;
+    r->pos = 0;
+    r->block = blocksize;
+
+    if (size_out)
+        *size_out = r->size;
+    *out = r;
+    return WB_OK;
+}
+
+int wb_reader_read(wb_reader *r, void *buf, size_t want, size_t *got)
+{
+    if (!r || !buf || !got)
+        return WB_ERR_INVAL;
+    *got = 0;
+    if (r->size && r->pos >= r->size)
+        return WB_OK;  /* end of device */
+
+    /* The raw device requires block-aligned read lengths (except the tail). */
+    uint64_t remaining = r->size ? (r->size - r->pos) : want;
+    uint64_t toread = want;
+    if (toread > remaining)
+        toread = remaining;
+    if (toread != remaining && (toread % r->block) != 0)
+        toread -= (toread % r->block);
+    if (toread == 0)
+        return WB_ERR_IO;
+
+    ssize_t n = read(r->fd, buf, (size_t)toread);
+    if (n < 0)
+        return WB_ERR_IO;
+    r->pos += (uint64_t)n;
+    *got = (size_t)n;
+    return WB_OK;
+}
+
+void wb_reader_close(wb_reader *r)
+{
+    if (r) {
+        close(r->fd);
+        free(r);
+    }
 }

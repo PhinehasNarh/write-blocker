@@ -9,6 +9,9 @@ set(WB_SOURCES
     src/main.c
     src/cli.c
     src/core.c
+    src/sha256.c
+    src/hash.c
+    src/audit.c
 )
 
 # Select exactly one backend by target OS. Android is detected first because

@@ -116,6 +116,9 @@ static int query_descriptor(HANDLE h, wb_device_t *dev)
     append_field(dev->model, sizeof(dev->model), buf, d->VendorIdOffset);
     append_field(dev->model, sizeof(dev->model), buf, d->ProductIdOffset);
 
+    dev->serial[0] = '\0';
+    append_field(dev->serial, sizeof(dev->serial), buf, d->SerialNumberOffset);
+
     dev->removable = (d->BusType == BusTypeUsb || d->RemovableMedia) ? 1 : 0;
     return 0;
 }
@@ -275,4 +278,100 @@ int wb_status(const char *id, int *read_only_out)
         return WB_ERR_IO;
     *read_only_out = ro;
     return WB_OK;
+}
+
+/* ---- Sequential reader (read-only) ---- */
+
+struct wb_reader {
+    HANDLE   h;
+    uint64_t size;     /* total bytes */
+    uint64_t pos;      /* bytes already read */
+    DWORD    sector;   /* bytes per sector, for alignment */
+};
+
+int wb_reader_open(const char *id, wb_reader **out, uint64_t *size_out)
+{
+    if (!id || !*id || !out)
+        return WB_ERR_INVAL;
+    int n = drive_number_from_id(id);
+    if (n < 0)
+        return WB_ERR_INVAL;
+
+    /* Reading raw device data requires GENERIC_READ (Administrator). */
+    HANDLE h = open_drive(n, GENERIC_READ);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED)  return WB_ERR_PERM;
+        if (err == ERROR_FILE_NOT_FOUND) return WB_ERR_NOT_FOUND;
+        return WB_ERR_IO;
+    }
+
+    GET_LENGTH_INFORMATION len;
+    DWORD ret = 0;
+    if (!DeviceIoControl(h, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
+                         &len, sizeof(len), &ret, NULL)) {
+        CloseHandle(h);
+        return WB_ERR_IO;
+    }
+
+    DISK_GEOMETRY geo;
+    DWORD sector = 512;
+    if (DeviceIoControl(h, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0,
+                        &geo, sizeof(geo), &ret, NULL) && geo.BytesPerSector)
+        sector = geo.BytesPerSector;
+
+    wb_reader *r = (wb_reader *)malloc(sizeof(*r));
+    if (!r) {
+        CloseHandle(h);
+        return WB_ERR_NOMEM;
+    }
+    r->h = h;
+    r->size = (uint64_t)len.Length.QuadPart;
+    r->pos = 0;
+    r->sector = sector;
+
+    if (size_out)
+        *size_out = r->size;
+    *out = r;
+    return WB_OK;
+}
+
+int wb_reader_read(wb_reader *r, void *buf, size_t want, size_t *got)
+{
+    if (!r || !buf || !got)
+        return WB_ERR_INVAL;
+    *got = 0;
+    if (r->pos >= r->size)
+        return WB_OK;  /* end of device */
+
+    uint64_t remaining = r->size - r->pos;
+    uint64_t toread = want;
+    if (toread > remaining)
+        toread = remaining;  /* remaining is a multiple of the sector size */
+
+    /*
+     * Reads from a physical-drive handle must be sector-aligned in length.
+     * The caller's buffer size is a multiple of the sector size; when we are
+     * not at the tail, clamp down to a sector multiple to stay aligned.
+     */
+    if (toread != remaining && (toread % r->sector) != 0)
+        toread -= (toread % r->sector);
+    if (toread == 0)
+        return WB_ERR_IO;  /* want smaller than one sector: unsupported here */
+
+    DWORD read_bytes = 0;
+    if (!ReadFile(r->h, buf, (DWORD)toread, &read_bytes, NULL))
+        return WB_ERR_IO;
+
+    r->pos += read_bytes;
+    *got = (size_t)read_bytes;
+    return WB_OK;
+}
+
+void wb_reader_close(wb_reader *r)
+{
+    if (r) {
+        CloseHandle(r->h);
+        free(r);
+    }
 }

@@ -19,7 +19,21 @@ int wb_status(const char *id, int *read_only_out);
 const char *wb_strerror(int rc);          /* in core.c */
 int wb_have_privilege(void);              /* per backend */
 const char *wb_privilege_name(void);      /* per backend */
+
+/* Sequential read-only access for hashing/imaging (per backend). */
+int  wb_reader_open(const char *id, wb_reader **out, uint64_t *size_out);
+int  wb_reader_read(wb_reader *r, void *buf, size_t want, size_t *got);
+void wb_reader_close(wb_reader *r);
 ```
+
+### Forensic features (v0.2.0)
+- **Hashing** (`src/hash.c`) streams the device through `wb_reader_*` into the
+  self-contained SHA-256 (`src/sha256.c`); a 1 MiB buffer keeps reads
+  sector-aligned for the Windows and macOS raw readers.
+- **Audit log** (`src/audit.c`) appends one JSON object per action. The hashed
+  pre-image of a record includes a `prev` field equal to the previous record's
+  `rec`, so the records form a SHA-256 chain; `audit-verify` recomputes every
+  `rec` and checks each `prev` link, detecting edits, deletions, or reordering.
 
 CMake selects exactly one backend file by `CMAKE_SYSTEM_NAME` (Android first,
 then Windows/Linux/Darwin). The core never touches OS-specific APIs.
