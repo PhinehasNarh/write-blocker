@@ -34,6 +34,12 @@ void wb_reader_close(wb_reader *r);
   pre-image of a record includes a `prev` field equal to the previous record's
   `rec`, so the records form a SHA-256 chain; `audit-verify` recomputes every
   `rec` and checks each `prev` link, detecting edits, deletions, or reordering.
+- **Self-test** (`wb_selftest` per backend) reads the first sector and writes
+  the identical bytes back. It is non-destructive by construction: a blocked
+  device rejects the write (`blocked = 1`); a writable device receives the same
+  bytes (`blocked = 0`). Linux/macOS open the device O_RDWR and use
+  pread/pwrite at offset 0; Windows writes sector 0, which lies outside any
+  mounted volume so no volume lock is needed.
 
 CMake selects exactly one backend file by `CMAKE_SYSTEM_NAME` (Android first,
 then Windows/Linux/Darwin). The core never touches OS-specific APIs.
@@ -105,11 +111,14 @@ cmake -S . -B build && cmake --build build
 dd if=/dev/zero of=/tmp/wb.img bs=1M count=64
 LOOP=$(sudo losetup -f --show /tmp/wb.img)   # e.g. /dev/loop0
 
-sudo ./build/writeblock protect "$LOOP" --yes
+sudo ./build/writeblock protect "$LOOP" --yes --selftest   # -> self-test: BLOCKED
 ./build/writeblock status "$LOOP"            # -> protected
 
 # A write must now fail with EROFS
 sudo dd if=/dev/zero of="$LOOP" bs=1M count=1   # expected: "Operation not permitted"/EROFS
+
+# Independent self-test (exit 0 = blocked)
+sudo ./build/writeblock selftest "$LOOP" --yes
 
 sudo ./build/writeblock unprotect "$LOOP" --yes
 sudo dd if=/dev/zero of="$LOOP" bs=1M count=1   # now succeeds

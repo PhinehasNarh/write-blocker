@@ -17,7 +17,7 @@
 #endif
 
 #define WB_PROG    "writeblock"
-#define WB_VERSION "0.2.0"
+#define WB_VERSION "0.3.0"
 #define DEFAULT_LOG "writeblock-audit.jsonl"
 
 /* Stable, documented exit codes for scripting. */
@@ -52,10 +52,11 @@ static void usage(FILE *f)
         "Usage:\n"
         "  %s list [--removable-only] [--json]\n"
         "  %s status <device-id> [--json]\n"
-        "  %s protect <device-id> [--yes] [--hash] [options]\n"
+        "  %s protect <device-id> [--yes] [--hash] [--selftest] [options]\n"
         "  %s unprotect <device-id> [--yes] [--hash] [options]\n"
         "  %s hash <device-id> [--quiet] [--json]\n"
         "  %s verify <device-id> <sha256> [--quiet]\n"
+        "  %s selftest <device-id> [--yes]\n"
         "  %s audit-verify [--log <path>]\n"
         "  %s version\n"
         "\n"
@@ -64,18 +65,20 @@ static void usage(FILE *f)
         "  --json            Machine-readable JSON (list, status, hash).\n"
         "  --yes             Skip the [y/N] prompt (non-system devices).\n"
         "  --hash            Compute and record the device SHA-256 with the action.\n"
+        "  --selftest        After protect, prove writes are rejected (write-back).\n"
         "  --case <id>       Case identifier recorded in the audit log.\n"
         "  --examiner <name> Examiner recorded in the audit log.\n"
         "  --log <path>      Audit log file (default: %s).\n"
         "  --quiet           Suppress hashing progress.\n"
         "\n"
         "Device ids come from 'list' (e.g. \\\\.\\PhysicalDrive1, /dev/sdb,\n"
-        "/dev/disk2). protect/unprotect/hash require %s.\n"
+        "/dev/disk2). protect/unprotect/hash/selftest require %s.\n"
         "\n"
         "Note: OS-level write protection is not tamper-proof against a privileged\n"
-        "user. See the README for details.\n",
+        "user. 'selftest' performs a non-destructive write-back of the first\n"
+        "sector. See the README for details.\n",
         WB_PROG, WB_VERSION, WB_PROG, WB_PROG, WB_PROG, WB_PROG, WB_PROG,
-        WB_PROG, WB_PROG, WB_PROG, DEFAULT_LOG, wb_privilege_name());
+        WB_PROG, WB_PROG, WB_PROG, WB_PROG, DEFAULT_LOG, wb_privilege_name());
 }
 
 /* ---- argument helpers ---- */
@@ -115,6 +118,7 @@ static const char *positional(int argc, char **argv, int index)
             strcmp(argv[i - 1], "--json") != 0 &&
             strcmp(argv[i - 1], "--yes") != 0 &&
             strcmp(argv[i - 1], "--hash") != 0 &&
+            strcmp(argv[i - 1], "--selftest") != 0 &&
             strcmp(argv[i - 1], "--quiet") != 0)
             continue;
         if (seen == index)
@@ -334,10 +338,66 @@ static int confirm_type_id(const wb_device_t *d)
     return strcmp(line, d->id) == 0;
 }
 
+/*
+ * Run the active write-block self-test and report the verdict. Sets
+ * *blocked_out to 1 (writes rejected) or 0 (write got through), and records the
+ * outcome in the audit log. Returns a wb_status_code.
+ */
+static int run_selftest(const wb_device_t *dev, const char *logpath,
+                        const char *case_id, const char *examiner, int *blocked_out)
+{
+    int blocked = -1;
+    int rc = wb_selftest(dev->id, &blocked);
+    if (rc != WB_OK) {
+        fprintf(stderr, "%s: self-test failed: %s\n", WB_PROG, wb_strerror(rc));
+        return rc;
+    }
+    if (blocked)
+        printf("self-test: BLOCKED (write rejected) on %s\n", dev->id);
+    else
+        printf("self-test: NOT BLOCKED (write succeeded) on %s\n", dev->id);
+
+    wb_audit_append(logpath, blocked ? "selftest-blocked" : "selftest-not-blocked",
+                    dev, case_id, examiner, NULL);
+    *blocked_out = blocked;
+    return WB_OK;
+}
+
+static int cmd_selftest(const char *id, int assume_yes, const char *logpath,
+                        const char *case_id, const char *examiner)
+{
+    if (!wb_have_privilege()) {
+        fprintf(stderr, "%s: %s privilege required for the self-test.\n",
+                WB_PROG, wb_privilege_name());
+        return EX_PERM;
+    }
+    wb_device_t dev;
+    int rc = wb_find_device(id, &dev);
+    if (rc != WB_OK) {
+        fprintf(stderr, "%s: %s\n", WB_PROG, wb_strerror(rc));
+        return exit_for(rc);
+    }
+
+    int ok = dev.is_system
+        ? confirm_type_id(&dev)
+        : confirm_yn("run a non-destructive write-back self-test on",
+                     &dev, assume_yes);
+    if (!ok) {
+        fprintf(stderr, "%s: aborted.\n", WB_PROG);
+        return EX_FAIL;
+    }
+
+    int blocked = 0;
+    rc = run_selftest(&dev, logpath, case_id, examiner, &blocked);
+    if (rc != WB_OK)
+        return exit_for(rc);
+    return blocked ? EX_OK : EX_MISMATCH;  /* mismatch: writes were NOT blocked */
+}
+
 /* Shared body for protect/unprotect. */
 static int do_change(const char *id, int protect, int assume_yes, int want_hash,
-                     const char *case_id, const char *examiner, const char *logpath,
-                     int quiet)
+                     int want_selftest, const char *case_id, const char *examiner,
+                     const char *logpath, int quiet)
 {
     if (!wb_have_privilege()) {
         fprintf(stderr, "%s: %s privilege required to change write protection.\n",
@@ -394,6 +454,18 @@ static int do_change(const char *id, int protect, int assume_yes, int want_hash,
     else
         fprintf(stderr, "%s: warning: could not write audit log %s: %s\n",
                 WB_PROG, logpath, wb_strerror(arc));
+
+    /* Optionally prove the block actually rejects writes (protect only). */
+    if (want_selftest && protect) {
+        int blocked = 0;
+        if (run_selftest(&dev, logpath, case_id, examiner, &blocked) == WB_OK &&
+            !blocked) {
+            fprintf(stderr,
+                    "%s: WARNING: device accepted a write after protect; the "
+                    "block is NOT effective.\n", WB_PROG);
+            return EX_FAIL;
+        }
+    }
     return EX_OK;
 }
 
@@ -447,12 +519,21 @@ int wb_cli_main(int argc, char **argv)
         return cmd_audit_verify(log ? log : DEFAULT_LOG);
     }
 
+    if (!strcmp(cmd, "selftest")) {
+        const char *id = positional(n, a, 0);
+        if (!id) { fprintf(stderr, "%s: selftest requires a device id\n", WB_PROG); return EX_USAGE; }
+        const char *log = flag_value(n, a, "--log");
+        return cmd_selftest(id, has_flag(n, a, "--yes"), log ? log : DEFAULT_LOG,
+                            flag_value(n, a, "--case"), flag_value(n, a, "--examiner"));
+    }
+
     if (!strcmp(cmd, "protect") || !strcmp(cmd, "unprotect")) {
         const char *id = positional(n, a, 0);
         if (!id) { fprintf(stderr, "%s: %s requires a device id\n", WB_PROG, cmd); return EX_USAGE; }
         const char *log = flag_value(n, a, "--log");
         return do_change(id, !strcmp(cmd, "protect"),
                          has_flag(n, a, "--yes"), has_flag(n, a, "--hash"),
+                         has_flag(n, a, "--selftest"),
                          flag_value(n, a, "--case"), flag_value(n, a, "--examiner"),
                          log ? log : DEFAULT_LOG, has_flag(n, a, "--quiet"));
     }

@@ -375,3 +375,67 @@ void wb_reader_close(wb_reader *r)
         free(r);
     }
 }
+
+/* ---- Active block self-test (non-destructive write-back) ---- */
+
+int wb_selftest(const char *id, int *blocked_out)
+{
+    if (!id || !*id || !blocked_out)
+        return WB_ERR_INVAL;
+    int n = drive_number_from_id(id);
+    if (n < 0)
+        return WB_ERR_INVAL;
+
+    HANDLE h = open_drive(n, GENERIC_READ | GENERIC_WRITE);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED)  return WB_ERR_PERM;
+        if (err == ERROR_FILE_NOT_FOUND) return WB_ERR_NOT_FOUND;
+        return WB_ERR_IO;
+    }
+
+    DISK_GEOMETRY geo;
+    DWORD ret = 0, sector = 512;
+    if (DeviceIoControl(h, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0,
+                        &geo, sizeof(geo), &ret, NULL) && geo.BytesPerSector)
+        sector = geo.BytesPerSector;
+    if (sector < 512)
+        sector = 512;
+
+    /* Reads/writes to a physical drive must be sector-aligned in size+offset.
+     * We touch only sector 0, which lies outside any mounted volume. */
+    unsigned char buf[65536];
+    if (sector > sizeof(buf)) {
+        CloseHandle(h);
+        return WB_ERR_UNSUPPORTED;  /* unusually large sector */
+    }
+
+    LARGE_INTEGER zero;
+    zero.QuadPart = 0;
+    DWORD got = 0;
+    if (!SetFilePointerEx(h, zero, NULL, FILE_BEGIN) ||
+        !ReadFile(h, buf, sector, &got, NULL) || got != sector) {
+        CloseHandle(h);
+        return WB_ERR_IO;
+    }
+
+    if (!SetFilePointerEx(h, zero, NULL, FILE_BEGIN)) {
+        CloseHandle(h);
+        return WB_ERR_IO;
+    }
+    DWORD wrote = 0;
+    if (!WriteFile(h, buf, got, &wrote, NULL)) {  /* identical bytes */
+        DWORD err = GetLastError();
+        CloseHandle(h);
+        if (err == ERROR_WRITE_PROTECT || err == ERROR_ACCESS_DENIED) {
+            *blocked_out = 1;
+            return WB_OK;
+        }
+        return WB_ERR_IO;
+    }
+
+    FlushFileBuffers(h);
+    CloseHandle(h);
+    *blocked_out = 0;  /* identical-bytes write succeeded: not blocked */
+    return WB_OK;
+}

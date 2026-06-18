@@ -3,6 +3,19 @@
 All notable changes to `writeblock` are documented here. Versions use semantic
 versioning once a 1.0 is cut; pre-1.0 minors may change behavior.
 
+## [0.3.0] - Active block self-test
+
+### Added
+- `selftest <device-id>`: actively proves the write block by reading the first
+  sector and writing the identical bytes back (non-destructive). Reports BLOCKED
+  (write rejected) or NOT BLOCKED (write succeeded), records the outcome in the
+  audit log, and exits 0 when blocked / 6 when not.
+- `protect --selftest`: runs the self-test right after protecting and warns
+  (non-zero exit) if the device still accepts a write.
+- New backend contract function `wb_selftest`, implemented on Linux, Windows,
+  macOS, and Android. Windows targets sector 0 (outside any mounted volume) so
+  the test does not require dismounting volumes.
+
 ## [0.2.0] - Forensic features
 
 ### Added

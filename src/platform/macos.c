@@ -391,3 +391,56 @@ void wb_reader_close(wb_reader *r)
         free(r);
     }
 }
+
+/* ---- Active block self-test (non-destructive write-back) ---- */
+
+int wb_selftest(const char *id, int *blocked_out)
+{
+    if (!id || !*id || !blocked_out)
+        return WB_ERR_INVAL;
+
+    char rpath[80];
+    raw_path(id, rpath, sizeof(rpath));
+    int fd = open(rpath, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        fd = open(id, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == EROFS || errno == EACCES || errno == EPERM) {
+            int r = open(rpath, O_RDONLY | O_CLOEXEC);
+            if (r < 0)
+                r = open(id, O_RDONLY | O_CLOEXEC);
+            if (r >= 0) {
+                close(r);
+                *blocked_out = 1;
+                return WB_OK;
+            }
+            return WB_ERR_PERM;
+        }
+        return (errno == ENOENT) ? WB_ERR_NOT_FOUND : WB_ERR_IO;
+    }
+
+    uint32_t bs = 512;
+    if (ioctl(fd, DKIOCGETBLOCKSIZE, &bs) != 0 || bs == 0 || bs > 65536)
+        bs = 512;
+
+    unsigned char buf[65536];
+    ssize_t n = pread(fd, buf, bs, 0);
+    if (n <= 0) {
+        close(fd);
+        return WB_ERR_IO;
+    }
+    ssize_t w = pwrite(fd, buf, (size_t)n, 0);  /* identical bytes */
+    if (w < 0) {
+        int blocked = (errno == EROFS || errno == EACCES || errno == EPERM);
+        close(fd);
+        if (!blocked)
+            return WB_ERR_IO;  /* inconclusive (e.g. busy), not a confirmed block */
+        *blocked_out = 1;
+        return WB_OK;
+    }
+
+    fsync(fd);
+    close(fd);
+    *blocked_out = 0;
+    return WB_OK;
+}

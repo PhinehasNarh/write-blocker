@@ -304,3 +304,50 @@ void wb_reader_close(wb_reader *r)
         free(r);
     }
 }
+
+/* ---- Active block self-test (non-destructive write-back) ---- */
+
+int wb_selftest(const char *id, int *blocked_out)
+{
+    if (!id || !*id || !blocked_out)
+        return WB_ERR_INVAL;
+
+    int fd = open(id, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        /* A read-only block device can refuse an O_RDWR open: confirm the
+         * device is otherwise readable, then report it as blocked. */
+        if (errno == EROFS || errno == EACCES || errno == EPERM) {
+            int r = open(id, O_RDONLY | O_CLOEXEC);
+            if (r >= 0) {
+                close(r);
+                *blocked_out = 1;
+                return WB_OK;
+            }
+            return WB_ERR_PERM;
+        }
+        return (errno == ENOENT) ? WB_ERR_NOT_FOUND : WB_ERR_IO;
+    }
+
+    /* Read the first sector, then write the identical bytes back. */
+    unsigned char buf[4096];
+    ssize_t n = pread(fd, buf, sizeof(buf), 0);
+    if (n <= 0) {
+        close(fd);
+        return WB_ERR_IO;
+    }
+    ssize_t w = pwrite(fd, buf, (size_t)n, 0);
+    if (w < 0) {
+        int blocked = (errno == EROFS || errno == EACCES || errno == EPERM);
+        close(fd);
+        if (!blocked)
+            return WB_ERR_IO;  /* inconclusive: a real I/O error, not a block */
+        *blocked_out = 1;
+        return WB_OK;
+    }
+
+    /* The identical-bytes write succeeded: the device is NOT blocked. */
+    fsync(fd);
+    close(fd);
+    *blocked_out = 0;
+    return WB_OK;
+}

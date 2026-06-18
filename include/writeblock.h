@@ -82,6 +82,15 @@ int  wb_reader_open(const char *id, wb_reader **out, uint64_t *size_out);
 int  wb_reader_read(wb_reader *r, void *buf, size_t want, size_t *got);
 void wb_reader_close(wb_reader *r);
 
+/*
+ * Active proof of the write block. Reads the first sector and writes the
+ * identical bytes back, so the test never changes device contents: a blocked
+ * device rejects the write and a writable device receives byte-identical data.
+ * On success sets *blocked_out to 1 (write rejected) or 0 (write succeeded).
+ * Returns WB_OK if the test ran, or a wb_status_code on error.
+ */
+int wb_selftest(const char *id, int *blocked_out);
+
 #ifdef __cplusplus
 }
 #endif

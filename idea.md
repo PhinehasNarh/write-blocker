@@ -10,8 +10,10 @@ and macOS. Items marked **(planned)** were already named as out-of-scope in
 - Impact: how much it improves forensic value or usability (high/med/low)
 - Effort: rough build cost (S/M/L)
 
-## Done in v0.2.0
+## Done in v0.2.0 - v0.3.0
 - Whole-device SHA-256 (`hash`) and `verify` against a known digest (section 2).
+- Block self-test: `selftest` and `protect --selftest` prove writes are rejected
+  via a non-destructive sector write-back (section 2).
 - Tamper-evident, hash-chained audit log + `audit-verify`, with `--case` and
   `--examiner` metadata and `--hash` recording (section 3).
 - Device serial in `list`/`status` (section 6); stable exit codes, `version`,
@@ -19,9 +21,9 @@ and macOS. Items marked **(planned)** were already named as out-of-scope in
 - Stronger system-disk confirmation: type the exact id, no `--yes` bypass
   (section 5).
 
-Still open from the lists below: the block self-test, daemon/watch mode,
-Windows volume dismount-before-readonly, one-step write-blocked imaging, kernel
-drivers, GUI, and CI. (CI was intentionally deferred by request.)
+Still open from the lists below: daemon/watch mode, Windows volume
+dismount-before-readonly, one-step write-blocked imaging, kernel drivers, GUI,
+and CI. (CI was intentionally deferred by request.)
 
 ---
 

@@ -58,9 +58,18 @@ writeblock protect <device-id> [--yes] [--hash] [--case ID] [--examiner NAME] [-
 writeblock unprotect <device-id> [--yes] [--hash] [--case ID] [--examiner NAME] [--log PATH]
 writeblock hash <device-id> [--quiet] [--json]
 writeblock verify <device-id> <sha256> [--quiet]
+writeblock selftest <device-id> [--yes]
 writeblock audit-verify [--log PATH]
 writeblock version
 ```
+
+### Proving the block (self-test)
+
+`selftest` (and `protect --selftest`) actively confirms the block: it reads the
+first sector and writes the identical bytes back, so it never changes device
+contents. A blocked device rejects the write (reported BLOCKED, exit 0); a
+writable device receives byte-identical data (reported NOT BLOCKED, exit 6).
+This turns "a flag was set" into positive proof that writes are refused.
 
 ### Integrity and audit
 
